@@ -190,50 +190,70 @@ export class MultiAgentService {
           throw new Error('当前还没有可用的多人协助模型，请先到设置面板配置并启用模型与凭证');
         }
 
-        const generatedAnswers: { agentName: string; answer: string }[] = [];
-
-        // 1. Each agent answers independently (Context = conversation history)
-        for (const config of agentsTemplate) {
+        const runAgentTurn = async (config: (typeof agentsTemplate)[number]) => {
           console.log(`[MultiAgent] Starting turn for ${config.name}`);
-          subject.next({ data: { control: 'start_turn', agentName: config.name } });
-
-          const completion = await config.client.chat.completions.create({
-            model: config.modelName,
-            messages: [
-              {
-                role: 'system',
-                content:
-                  config.systemPrompt ||
-                  '你是一个专业的 AI 协作顾问。请结合当前会话上下文，提供清晰、具体、对整体协作有新增价值的回答。',
-              },
-              ...currentContext
-            ],
-            stream: true,
-          }, { signal });
-
+          subject.next({ data: { control: 'start_turn', agentId: config.id, agentName: config.name } });
           let turnContent = '';
-          for await (const chunk of completion) {
-            const content = chunk.choices[0]?.delta?.content || '';
-            if (content) {
-              turnContent += content;
-              subject.next({ data: { content, agentName: config.name } });
+
+          try {
+            const completion = await config.client.chat.completions.create({
+              model: config.modelName,
+              messages: [
+                {
+                  role: 'system',
+                  content:
+                    config.systemPrompt ||
+                    '你是一个专业的 AI 协作顾问。请结合当前会话上下文，提供清晰、具体、对整体协作有新增价值的回答。',
+                },
+                ...currentContext,
+              ],
+              stream: true,
+            }, { signal });
+
+            for await (const chunk of completion) {
+              const content = chunk.choices[0]?.delta?.content || '';
+              if (content) {
+                turnContent += content;
+                subject.next({ data: { content, agentId: config.id, agentName: config.name } });
+              }
             }
+            console.log(`[MultiAgent] Finished turn for ${config.name}. Length: ${turnContent.length}`);
+
+            if (turnContent.trim()) {
+              await this.prisma.message.create({
+                data: {
+                  sessionId,
+                  content: turnContent,
+                  role: 'ASSISTANT',
+                  modeSnapshot: session.mode,
+                  agentId: config.id,
+                  agentName: config.name,
+                },
+              });
+            }
+          } catch (err: any) {
+            if (err?.name === 'AbortError') {
+              throw err;
+            }
+
+            console.error(`[MultiAgent] ${config.name} failed`, err);
+            subject.next({
+              data: {
+                content: `\n\n[系统异常]: ${config.name} 回答失败 - ${err?.message || '未知错误'}`,
+                agentName: '系统',
+              },
+            });
+          } finally {
+            subject.next({ data: { control: 'end_turn', agentId: config.id, agentName: config.name } });
           }
-          console.log(`[MultiAgent] Finished turn for ${config.name}. Length: ${turnContent.length}`);
+        };
 
-          await this.prisma.message.create({
-            data: {
-              sessionId,
-              content: turnContent,
-              role: 'ASSISTANT',
-              modeSnapshot: session.mode,
-              agentId: config.id,
-              agentName: config.name,
-            }
-          });
+        await Promise.allSettled(agentsTemplate.map((config) => runAgentTurn(config)));
 
-          generatedAnswers.push({ agentName: config.name, answer: turnContent });
-          subject.next({ data: { control: 'end_turn', agentName: config.name } });
+        if (signal?.aborted) {
+          console.log(`[MultiAgent] Client disconnected.`);
+          subject.complete();
+          return;
         }
 
         subject.next({ data: { control: 'stream_done' } });

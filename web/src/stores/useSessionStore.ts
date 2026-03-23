@@ -102,6 +102,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const sessions = data.map((s: any) => ({
         ...s,
         mode: s.mode.toLowerCase().replace('_', '-'),
+        messages: Array.isArray(s.messages) ? s.messages.map(normalizeMessage) : [],
       }))
       set({ sessions, isLoading: false })
       if (sessions.length > 0 && !get().activeSessionId) {
@@ -120,7 +121,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const sessionData = await res.json()
       set((state) => ({
         sessions: state.sessions.map((s) => 
-          s.id === id ? { ...s, messages: sessionData.messages.map(normalizeMessage) } : s
+          s.id === id
+            ? {
+                ...s,
+                messages: Array.isArray(sessionData.messages)
+                  ? sessionData.messages.map(normalizeMessage)
+                  : [],
+              }
+            : s
         )
       }))
     } catch (error) {
@@ -131,7 +139,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   addMessage: (sessionId, message) => set((state) => ({
     sessions: state.sessions.map((session) => 
       session.id === sessionId 
-        ? { ...session, messages: [...session.messages, message] }
+        ? { ...session, messages: [...(session.messages || []), message] }
         : session
     )
   })),
@@ -141,7 +149,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       session.id === sessionId 
         ? { 
             ...session, 
-            messages: session.messages.map(m => m.id === messageId ? { ...m, content } : m) 
+            messages: (session.messages || []).map(m => m.id === messageId ? { ...m, content } : m) 
           }
         : session
     )
@@ -207,7 +215,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   sendMessage: async (sessionId, content) => {
     const session = get().sessions.find(s => s.id === sessionId);
-    if (session && session.messages.length === 0 && session.title === '新会话') {
+    if (session && (session.messages?.length ?? 0) === 0 && session.title === '新会话') {
       const newTitle = content.length > 20 ? content.slice(0, 20) + '...' : content;
       get().updateSessionTitle(sessionId, newTitle);
     }
@@ -229,12 +237,47 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const eventSource = new EventSource(url)
       set({ activeEventSource: eventSource })
       
-      let aiMsgId = `temp-ai-${Date.now()}`
-      let fullContent = ''
-      let isFirstChunk = true
       let streamCompleted = false
       let hasRenderedResponse = false
+      const isMultiAgentMode = session?.mode === 'multi-agent'
       const isMultiTurnMode = session?.mode === 'multi-agent' || session?.mode === 'debate'
+      let messageSeq = 0
+      let activeTurnCount = 0
+      const activeAgentMessages = new Map<string, { messageId: string; content: string }>()
+
+      const getAgentKey = (agentName?: string, agentId?: string) =>
+        `${agentId || 'anonymous'}::${agentName || 'Veritas AI'}`
+
+      const ensureAgentMessage = (
+        agentName?: string,
+        agentId?: string,
+        options?: { createPlaceholder?: boolean }
+      ) => {
+        const key = getAgentKey(agentName, agentId)
+        let streamState = activeAgentMessages.get(key)
+
+        if (!streamState) {
+          streamState = {
+            messageId: `temp-ai-${Date.now()}-${messageSeq++}`,
+            content: '',
+          }
+          activeAgentMessages.set(key, streamState)
+
+          if (options?.createPlaceholder) {
+            get().addMessage(sessionId, {
+              id: streamState.messageId,
+              role: 'assistant',
+              content: '',
+              agentId,
+              agentName: agentName || 'Veritas AI',
+              createdAt: new Date().toISOString(),
+              modeSnapshot: session?.mode,
+            })
+          }
+        }
+
+        return { key, streamState }
+      }
 
       eventSource.onmessage = (event) => {
         // Handle multiple JSON objects in one message if they arrive together
@@ -243,17 +286,22 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         for (const rawChunk of chunks) {
           try {
             const data = JSON.parse(rawChunk)
-            const { content, agentName, control } = data
+            const { content, agentId, agentName, control } = data
             
             if (control === 'start_turn') {
-              aiMsgId = `ai-${Date.now()}`
-              fullContent = ''
-              isFirstChunk = true
+              ensureAgentMessage(agentName, agentId, { createPlaceholder: isMultiAgentMode })
+              activeTurnCount += 1
               set({ isTyping: true })
               continue
             }
 
             if (control === 'end_turn') {
+              const key = getAgentKey(agentName, agentId)
+              activeAgentMessages.delete(key)
+              activeTurnCount = Math.max(0, activeTurnCount - 1)
+              if (!streamCompleted && activeTurnCount === 0) {
+                set({ isTyping: false })
+              }
               continue
             }
 
@@ -266,24 +314,29 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
             if (content) {
               hasRenderedResponse = true
-              if (isFirstChunk) {
+              const { streamState } = ensureAgentMessage(agentName, agentId)
+              const nextContent = `${streamState.content}${content}`
+
+              if (isMultiAgentMode) {
+                get().updateMessageContent(sessionId, streamState.messageId, nextContent)
+              } else if (!streamState.content) {
                 if (!isMultiTurnMode) {
                   set({ isTyping: false })
                 }
                 get().addMessage(sessionId, {
-                  id: aiMsgId,
+                  id: streamState.messageId,
                   role: 'assistant',
-                  content: content,
+                  content: nextContent,
+                  agentId,
                   agentName: agentName || 'Veritas AI',
                   createdAt: new Date().toISOString(),
                   modeSnapshot: session?.mode,
                 })
-                isFirstChunk = false
-                fullContent = content
               } else {
-                fullContent += content
-                get().updateMessageContent(sessionId, aiMsgId, fullContent)
+                get().updateMessageContent(sessionId, streamState.messageId, nextContent)
               }
+
+              streamState.content = nextContent
             }
           } catch (e) {
             console.error('Failed to parse SSE chunk:', rawChunk, e)
