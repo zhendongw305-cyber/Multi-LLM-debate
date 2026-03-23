@@ -1,0 +1,58 @@
+CREATE TABLE IF NOT EXISTS `ProviderCredential` (
+  `id` VARCHAR(191) NOT NULL,
+  `name` VARCHAR(191) NOT NULL,
+  `provider` VARCHAR(191) NOT NULL,
+  `apiKey` TEXT NOT NULL,
+  `baseURL` TEXT NULL,
+  `defaultHeaders` JSON NULL,
+  `active` BOOLEAN NOT NULL DEFAULT true,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updatedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `ProviderCredential_name_key` (`name`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `Session` (
+  `id` VARCHAR(191) NOT NULL,
+  `title` VARCHAR(191) NOT NULL,
+  `mode` ENUM('NORMAL','MULTI_AGENT','DEBATE') NOT NULL DEFAULT 'NORMAL',
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updatedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `Agent` (
+  `id` VARCHAR(191) NOT NULL,
+  `name` VARCHAR(191) NOT NULL,
+  `modelName` VARCHAR(191) NOT NULL,
+  `provider` VARCHAR(191) NOT NULL,
+  `systemPrompt` TEXT NULL,
+  `active` BOOLEAN NOT NULL DEFAULT true,
+  `roleType` VARCHAR(191) NULL,
+  `sortOrder` INT NOT NULL DEFAULT 0,
+  `includeInNormal` BOOLEAN NOT NULL DEFAULT false,
+  `includeInMultiAgent` BOOLEAN NOT NULL DEFAULT false,
+  `includeInDebate` BOOLEAN NOT NULL DEFAULT false,
+  `credentialId` VARCHAR(191) NULL,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updatedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE INDEX `Agent_credentialId_idx` ON `Agent` (`credentialId`);
+
+CREATE TABLE IF NOT EXISTS `Message` (
+  `id` VARCHAR(191) NOT NULL,
+  `sessionId` VARCHAR(191) NOT NULL,
+  `role` ENUM('USER','ASSISTANT','SYSTEM') NOT NULL,
+  `modeSnapshot` ENUM('NORMAL','MULTI_AGENT','DEBATE') NULL,
+  `content` TEXT NOT NULL,
+  `agentId` VARCHAR(191) NULL,
+  `agentName` VARCHAR(191) NULL,
+  `targetAgent` VARCHAR(191) NULL,
+  `consensusPct` DOUBLE NULL,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  INDEX `Message_sessionId_idx`(`sessionId`),
+  CONSTRAINT `Message_sessionId_fkey` FOREIGN KEY (`sessionId`) REFERENCES `Session`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

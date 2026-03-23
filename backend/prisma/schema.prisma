@@ -1,0 +1,81 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum SessionMode {
+  NORMAL
+  MULTI_AGENT
+  DEBATE
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+model Session {
+  id        String      @id @default(uuid())
+  title     String
+  mode      SessionMode @default(NORMAL)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  messages  Message[]
+}
+
+model ProviderCredential {
+  id             String   @id @default(uuid())
+  name           String   @unique
+  provider       String
+  apiKey         String   @db.Text
+  baseURL        String?  @db.Text
+  defaultHeaders Json?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  agents         Agent[]
+}
+
+model Message {
+  id           String      @id @default(uuid())
+  sessionId    String
+  session      Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role         MessageRole
+  modeSnapshot SessionMode?
+  content      String      @db.Text
+  agentId      String?     // Optional ID if from a specific agent
+  agentName    String?     // Display name for the agent
+  targetAgent  String?     // For debate mode: who this is responding to
+  consensusPct Float?      // For multi-agent mode
+  createdAt    DateTime    @default(now())
+
+  @@index([sessionId])
+}
+
+model Agent {
+  id                  String              @id @default(uuid())
+  name                String
+  modelName           String
+  provider            String              // e.g., "openai", "deepseek"
+  systemPrompt        String?             @db.Text
+  active              Boolean             @default(true)
+  roleType            String?
+  sortOrder           Int                 @default(0)
+  includeInNormal     Boolean             @default(false)
+  includeInMultiAgent Boolean             @default(false)
+  includeInDebate     Boolean             @default(false)
+  credentialId        String?
+  credential          ProviderCredential? @relation(fields: [credentialId], references: [id], onDelete: SetNull)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  @@index([credentialId])
+}

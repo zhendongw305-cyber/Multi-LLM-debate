@@ -1,0 +1,371 @@
+import { create } from 'zustand'
+import { API_BASE } from '@/lib/config'
+
+export type Mode = 'normal' | 'multi-agent' | 'debate'
+
+const normalizeMode = (value?: string | null): Mode | undefined => {
+  if (!value) return undefined
+  return value.toLowerCase().replace('_', '-') as Mode
+}
+
+const normalizeMessage = (message: any): Message => ({
+  ...message,
+  modeSnapshot: normalizeMode(message.modeSnapshot),
+})
+
+export interface Message {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  createdAt: string
+  agentId?: string
+  agentName?: string
+  modeSnapshot?: Mode
+}
+
+export interface Session {
+  id: string
+  title: string
+  mode: Mode
+  createdAt: string
+  messages: Message[]
+}
+
+export interface MultiAgentSummaryPoint {
+  id: string
+  content: string
+  consensusPercent: number
+  supportingAgents: string[]
+}
+
+export interface MultiAgentAgentAnswer {
+  agentId?: string
+  agentName: string
+  content: string
+}
+
+export interface MultiAgentSummaryData {
+  userMessageId: string
+  question: string
+  overallSummary: string
+  totalAgents: number
+  points: MultiAgentSummaryPoint[]
+  agentAnswers: MultiAgentAgentAnswer[]
+}
+
+interface SessionStore {
+  sessions: Session[]
+  activeSessionId: string | null
+  isLoading: boolean
+  isTyping: boolean
+  activeEventSource: EventSource | null
+  multiAgentSummaries: Record<string, MultiAgentSummaryData>
+  multiAgentSummaryLoading: Record<string, boolean>
+  multiAgentSummaryErrors: Record<string, string>
+  
+  // Actions
+  fetchSessions: () => Promise<void>
+  setActiveSession: (id: string) => Promise<void>
+  addMessage: (sessionId: string, message: Message) => void
+  updateMessageContent: (sessionId: string, messageId: string, content: string) => void
+  createSession: (title?: string, mode?: Mode) => Promise<string>
+  updateSessionMode: (sessionId: string, mode: Mode) => Promise<void>
+  updateSessionTitle: (sessionId: string, title: string) => Promise<void>
+  sendMessage: (sessionId: string, content: string) => Promise<void>
+  generateMultiAgentSummary: (sessionId: string, userMessageId: string) => Promise<void>
+  stopGenerating: () => void
+}
+
+export const useSessionStore = create<SessionStore>((set, get) => ({
+  sessions: [],
+  activeSessionId: null,
+  isLoading: false,
+  isTyping: false,
+  activeEventSource: null,
+  multiAgentSummaries: {},
+  multiAgentSummaryLoading: {},
+  multiAgentSummaryErrors: {},
+
+  stopGenerating: () => {
+    const { activeEventSource } = get()
+    if (activeEventSource) {
+      activeEventSource.close()
+      set({ activeEventSource: null, isTyping: false })
+    }
+  },
+
+  fetchSessions: async () => {
+    set({ isLoading: true })
+    try {
+      const res = await fetch(`${API_BASE}/sessions`)
+      const data = await res.json()
+      const sessions = data.map((s: any) => ({
+        ...s,
+        mode: s.mode.toLowerCase().replace('_', '-'),
+      }))
+      set({ sessions, isLoading: false })
+      if (sessions.length > 0 && !get().activeSessionId) {
+        get().setActiveSession(sessions[0].id)
+      }
+    } catch (error) {
+      console.error('Failed to fetch sessions:', error)
+      set({ isLoading: false })
+    }
+  },
+
+  setActiveSession: async (id) => {
+    set({ activeSessionId: id })
+    try {
+      const res = await fetch(`${API_BASE}/sessions/${id}`)
+      const sessionData = await res.json()
+      set((state) => ({
+        sessions: state.sessions.map((s) => 
+          s.id === id ? { ...s, messages: sessionData.messages.map(normalizeMessage) } : s
+        )
+      }))
+    } catch (error) {
+      console.error('Failed to fetch session messages:', error)
+    }
+  },
+
+  addMessage: (sessionId, message) => set((state) => ({
+    sessions: state.sessions.map((session) => 
+      session.id === sessionId 
+        ? { ...session, messages: [...session.messages, message] }
+        : session
+    )
+  })),
+
+  updateMessageContent: (sessionId, messageId, content) => set((state) => ({
+    sessions: state.sessions.map((session) => 
+      session.id === sessionId 
+        ? { 
+            ...session, 
+            messages: session.messages.map(m => m.id === messageId ? { ...m, content } : m) 
+          }
+        : session
+    )
+  })),
+
+  createSession: async (title = '新会话', mode = 'normal') => {
+    try {
+      const res = await fetch(`${API_BASE}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, mode: mode.toUpperCase().replace('-', '_') }),
+      })
+      const newSession = await res.json()
+      const formattedSession = {
+        ...newSession,
+        mode: newSession.mode.toLowerCase().replace('_', '-'),
+        messages: []
+      }
+      set((state) => ({
+        sessions: [formattedSession, ...state.sessions],
+        activeSessionId: formattedSession.id
+      }))
+      return formattedSession.id
+    } catch (error) {
+      console.error('Failed to create session:', error)
+      return ''
+    }
+  },
+
+  updateSessionMode: async (sessionId, mode) => {
+    try {
+      await fetch(`${API_BASE}/sessions/${sessionId}/mode`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: mode.toUpperCase().replace('-', '_') }),
+      })
+      set((state) => ({
+        sessions: state.sessions.map((s) => 
+          s.id === sessionId ? { ...s, mode } : s
+        )
+      }))
+    } catch (error) {
+      console.error('Failed to update session mode:', error)
+    }
+  },
+
+  updateSessionTitle: async (sessionId, title) => {
+    try {
+      await fetch(`${API_BASE}/sessions/${sessionId}/title`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      })
+      set((state) => ({
+        sessions: state.sessions.map((s) => 
+          s.id === sessionId ? { ...s, title } : s
+        )
+      }))
+    } catch (error) {
+      console.error('Failed to update session title:', error)
+    }
+  },
+
+  sendMessage: async (sessionId, content) => {
+    const session = get().sessions.find(s => s.id === sessionId);
+    if (session && session.messages.length === 0 && session.title === '新会话') {
+      const newTitle = content.length > 20 ? content.slice(0, 20) + '...' : content;
+      get().updateSessionTitle(sessionId, newTitle);
+    }
+
+    // 1. Add user message locally
+    const userMsg: Message = {
+      id: `temp-user-${Date.now()}`,
+      role: 'user',
+      content,
+      createdAt: new Date().toISOString(),
+      modeSnapshot: session?.mode,
+    }
+    get().addMessage(sessionId, userMsg)
+    set({ isTyping: true })
+
+    try {
+      // 2. Start SSE Stream
+      const url = `${API_BASE}/chat/stream?sessionId=${sessionId}&content=${encodeURIComponent(content)}`
+      const eventSource = new EventSource(url)
+      set({ activeEventSource: eventSource })
+      
+      let aiMsgId = `temp-ai-${Date.now()}`
+      let fullContent = ''
+      let isFirstChunk = true
+      let streamCompleted = false
+      let hasRenderedResponse = false
+      const isMultiTurnMode = session?.mode === 'multi-agent' || session?.mode === 'debate'
+
+      eventSource.onmessage = (event) => {
+        // Handle multiple JSON objects in one message if they arrive together
+        const chunks = event.data.split('\n').filter((c: string) => c.trim())
+        
+        for (const rawChunk of chunks) {
+          try {
+            const data = JSON.parse(rawChunk)
+            const { content, agentName, control } = data
+            
+            if (control === 'start_turn') {
+              aiMsgId = `ai-${Date.now()}`
+              fullContent = ''
+              isFirstChunk = true
+              set({ isTyping: true })
+              continue
+            }
+
+            if (control === 'end_turn') {
+              continue
+            }
+
+            if (control === 'stream_done') {
+              streamCompleted = true
+              eventSource.close()
+              set({ isTyping: false, activeEventSource: null })
+              continue
+            }
+
+            if (content) {
+              hasRenderedResponse = true
+              if (isFirstChunk) {
+                if (!isMultiTurnMode) {
+                  set({ isTyping: false })
+                }
+                get().addMessage(sessionId, {
+                  id: aiMsgId,
+                  role: 'assistant',
+                  content: content,
+                  agentName: agentName || 'Veritas AI',
+                  createdAt: new Date().toISOString(),
+                  modeSnapshot: session?.mode,
+                })
+                isFirstChunk = false
+                fullContent = content
+              } else {
+                fullContent += content
+                get().updateMessageContent(sessionId, aiMsgId, fullContent)
+              }
+            }
+          } catch (e) {
+            console.error('Failed to parse SSE chunk:', rawChunk, e)
+          }
+        }
+      }
+
+      eventSource.onerror = (err) => {
+        console.error('SSE Error:', err)
+        eventSource.close()
+        if (!streamCompleted && !hasRenderedResponse) {
+          get().addMessage(sessionId, {
+            id: `system-error-${Date.now()}`,
+            role: 'system',
+            content: '当前请求没有成功完成。请检查该模式是否已经配置可用模型与凭证，然后重试。',
+            agentName: '系统',
+            createdAt: new Date().toISOString(),
+            modeSnapshot: session?.mode,
+          })
+        }
+        set({ isTyping: false, activeEventSource: null })
+      }
+
+      // Cleanup on completion or unexpected close
+      // Note: NestJS SSE finishes when the stream completes
+    } catch (error) {
+      console.error('Failed to send message:', error)
+      set({ isTyping: false })
+    }
+  },
+
+  generateMultiAgentSummary: async (sessionId, userMessageId) => {
+    if (get().multiAgentSummaryLoading[userMessageId]) {
+      return
+    }
+
+    set((state) => ({
+      multiAgentSummaryLoading: {
+        ...state.multiAgentSummaryLoading,
+        [userMessageId]: true,
+      },
+      multiAgentSummaryErrors: {
+        ...state.multiAgentSummaryErrors,
+        [userMessageId]: '',
+      },
+    }))
+
+    try {
+      const res = await fetch(`${API_BASE}/chat/multi-agent-summary`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, userMessageId }),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data?.message || '多人协助总结生成失败，请稍后重试')
+      }
+
+      set((state) => ({
+        multiAgentSummaries: {
+          ...state.multiAgentSummaries,
+          [userMessageId]: data,
+          [data.userMessageId]: data,
+        },
+        multiAgentSummaryLoading: {
+          ...state.multiAgentSummaryLoading,
+          [userMessageId]: false,
+        },
+      }))
+    } catch (error) {
+      set((state) => ({
+        multiAgentSummaryLoading: {
+          ...state.multiAgentSummaryLoading,
+          [userMessageId]: false,
+        },
+        multiAgentSummaryErrors: {
+          ...state.multiAgentSummaryErrors,
+          [userMessageId]: error instanceof Error ? error.message : '多人协助总结生成失败，请稍后重试',
+        },
+      }))
+    }
+  },
+}))
