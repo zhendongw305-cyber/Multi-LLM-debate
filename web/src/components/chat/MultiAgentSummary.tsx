@@ -181,7 +181,7 @@ export default function MultiAgentSummary({
                             ? "border-sky-200 bg-sky-50 text-sky-700"
                             : "border-amber-200 bg-amber-50 text-amber-700"
                         )}>
-                          {point.consensusPercent}% 可信度
+                          {point.consensusPercent}% 被提及
                         </span>
                         <span className="text-[12px] text-muted-foreground">
                           支持模型：{point.supportingAgents.join('、')}

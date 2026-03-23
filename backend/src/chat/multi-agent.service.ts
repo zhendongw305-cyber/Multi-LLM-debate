@@ -3,6 +3,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Observable, Subject } from 'rxjs';
 import { AgentsService } from '../agents/agents.service';
 import { MessageRole, SessionMode } from '@prisma/client';
+import {
+  buildMultiAgentSummaryTarget,
+  MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+} from './chat.constants';
 
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -154,12 +158,85 @@ export class MultiAgentService {
 
   private async getRecentMessages(sessionId: string, limit: number) {
     const messages = await this.prisma.message.findMany({
-      where: { sessionId },
+      where: {
+        sessionId,
+        NOT: {
+          targetAgent: {
+            startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+          },
+        },
+      },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
 
     return messages.reverse();
+  }
+
+  private parseStoredSummary(rawContent: string): MultiAgentRoundSummary | null {
+    try {
+      return JSON.parse(rawContent) as MultiAgentRoundSummary;
+    } catch (error) {
+      console.error('[MultiAgent summary parse failed]', error);
+      return null;
+    }
+  }
+
+  private async getStoredSummary(sessionId: string, userMessageId: string) {
+    const summaryMessage = await this.prisma.message.findFirst({
+      where: {
+        sessionId,
+        targetAgent: buildMultiAgentSummaryTarget(userMessageId),
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    if (!summaryMessage?.content) {
+      return null;
+    }
+
+    return this.parseStoredSummary(summaryMessage.content);
+  }
+
+  private async persistSummaryResult(
+    sessionId: string,
+    summary: MultiAgentRoundSummary,
+    meta?: { agentId?: string | null; agentName?: string | null },
+  ) {
+    const targetAgent = buildMultiAgentSummaryTarget(summary.userMessageId);
+    const existing = await this.prisma.message.findFirst({
+      where: {
+        sessionId,
+        targetAgent,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    const payload = {
+      sessionId,
+      content: JSON.stringify(summary),
+      role: 'SYSTEM' as MessageRole,
+      modeSnapshot: 'MULTI_AGENT' as SessionMode,
+      agentId: meta?.agentId || null,
+      agentName: meta?.agentName || '多模型总结',
+      targetAgent,
+    };
+
+    if (existing) {
+      await this.prisma.message.update({
+        where: { id: existing.id },
+        data: payload,
+      });
+      return;
+    }
+
+    await this.prisma.message.create({
+      data: payload,
+    });
   }
 
   async runMultiAgent(sessionId: string, initialContent: string, signal?: AbortSignal): Promise<Observable<any>> {
@@ -281,6 +358,11 @@ export class MultiAgentService {
       userMessageId,
     );
 
+    const storedSummary = await this.getStoredSummary(sessionId, resolvedUserMessageId);
+    if (storedSummary) {
+      return storedSummary;
+    }
+
     const summarizer = await this.agentsService.getRuntimeAgentByRoleType('summary');
 
     if (!summarizer) {
@@ -359,7 +441,7 @@ export class MultiAgentService {
         throw new Error('No valid summary points generated');
       }
 
-      return {
+      const summary = {
         userMessageId: resolvedUserMessageId,
         question,
         overallSummary:
@@ -369,13 +451,27 @@ export class MultiAgentService {
         points,
         agentAnswers,
       };
+
+      await this.persistSummaryResult(sessionId, summary, {
+        agentId: summarizer.id,
+        agentName: summarizer.name,
+      });
+
+      return summary;
     } catch (error) {
       console.error('[MultiAgent summary fallback]', error);
       const fallbackSummary = this.buildFallbackSummary(question, agentAnswers);
-      return {
+      const summary = {
         ...fallbackSummary,
         userMessageId: resolvedUserMessageId,
       };
+
+      await this.persistSummaryResult(sessionId, summary, {
+        agentId: summarizer.id,
+        agentName: summarizer.name,
+      });
+
+      return summary;
     }
   }
 }

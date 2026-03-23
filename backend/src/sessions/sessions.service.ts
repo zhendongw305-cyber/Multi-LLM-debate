@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionMode } from '@prisma/client';
+import { MULTI_AGENT_SUMMARY_TARGET_PREFIX } from '../chat/chat.constants';
 
 @Injectable()
 export class SessionsService {
@@ -31,6 +32,13 @@ export class SessionsService {
       where: { id },
       include: {
         messages: {
+          where: {
+            NOT: {
+              targetAgent: {
+                startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+              },
+            },
+          },
           orderBy: { createdAt: 'asc' },
         },
       },

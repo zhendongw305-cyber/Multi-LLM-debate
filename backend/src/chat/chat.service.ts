@@ -5,6 +5,7 @@ import { Observable } from 'rxjs';
 import { DebateService } from './debate.service';
 import { MultiAgentService } from './multi-agent.service';
 import { AgentsService } from '../agents/agents.service';
+import { MULTI_AGENT_SUMMARY_TARGET_PREFIX } from './chat.constants';
 
 @Injectable()
 export class ChatService {
@@ -20,6 +21,13 @@ export class ChatService {
       where: { id: sessionId },
       include: {
         messages: {
+          where: {
+            NOT: {
+              targetAgent: {
+                startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+              },
+            },
+          },
           orderBy: { createdAt: 'desc' },
           take: limit,
         },
