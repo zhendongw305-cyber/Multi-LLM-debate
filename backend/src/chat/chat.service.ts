@@ -22,11 +22,18 @@ export class ChatService {
       include: {
         messages: {
           where: {
-            NOT: {
-              targetAgent: {
-                startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+            OR: [
+              {
+                targetAgent: null,
               },
-            },
+              {
+                targetAgent: {
+                  not: {
+                    startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+                  },
+                },
+              },
+            ],
           },
           orderBy: { createdAt: 'desc' },
           take: limit,

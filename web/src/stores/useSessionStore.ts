@@ -64,6 +64,7 @@ export interface Session {
   title: string
   mode: Mode
   createdAt: string
+  messageCount: number
   messages: Message[]
 }
 
@@ -149,6 +150,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const sessions = data.map((s: any) => ({
         ...s,
         mode: s.mode.toLowerCase().replace('_', '-'),
+        messageCount: s._count?.messages ?? 0,
         messages: Array.isArray(s.messages) ? s.messages.map(normalizeMessage) : [],
       }))
       set({ sessions, isLoading: false })
@@ -176,6 +178,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           s.id === id
             ? {
                 ...s,
+                messageCount: Array.isArray(sessionData.messages) ? sessionData.messages.length : s.messageCount,
                 messages: Array.isArray(sessionData.messages)
                   ? sessionData.messages.map(normalizeMessage)
                   : [],
@@ -197,7 +200,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   addMessage: (sessionId, message) => set((state) => ({
     sessions: state.sessions.map((session) => 
       session.id === sessionId 
-        ? { ...session, messages: [...(session.messages || []), message] }
+        ? { ...session, messageCount: session.messageCount + 1, messages: [...(session.messages || []), message] }
         : session
     )
   })),
@@ -224,6 +227,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const formattedSession = {
         ...newSession,
         mode: newSession.mode.toLowerCase().replace('_', '-'),
+        messageCount: 0,
         messages: []
       }
       set((state) => ({
@@ -239,11 +243,17 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   updateSessionMode: async (sessionId, mode) => {
     try {
-      await fetch(`${API_BASE}/sessions/${sessionId}/mode`, {
+      const res = await fetch(`${API_BASE}/sessions/${sessionId}/mode`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: mode.toUpperCase().replace('-', '_') }),
       })
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null)
+        throw new Error(errorData?.message || '当前会话模式无法修改')
+      }
+
       set((state) => ({
         sessions: state.sessions.map((s) => 
           s.id === sessionId ? { ...s, mode } : s

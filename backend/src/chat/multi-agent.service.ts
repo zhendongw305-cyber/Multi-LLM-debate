@@ -71,6 +71,15 @@ ${latestQuestionBlock}
     return content.trim().startsWith('[系统异常]:');
   }
 
+  private buildConversationContext(recentMessages: { role: MessageRole; content: string }[]): ChatMessage[] {
+    return recentMessages
+      .filter((message) => message.role === 'USER' && message.content?.trim())
+      .map((message) => ({
+        role: 'user' as const,
+        content: message.content.trim(),
+      }));
+  }
+
   private findLastUserMessageIndex(
     messages: { id: string; role: MessageRole; modeSnapshot: SessionMode | null }[],
     userMessageId?: string,
@@ -190,11 +199,18 @@ ${latestQuestionBlock}
     const messages = await this.prisma.message.findMany({
       where: {
         sessionId,
-        NOT: {
-          targetAgent: {
-            startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+        OR: [
+          {
+            targetAgent: null,
           },
-        },
+          {
+            targetAgent: {
+              not: {
+                startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+              },
+            },
+          },
+        ],
       },
       orderBy: { createdAt: 'desc' },
       take: limit,
@@ -285,19 +301,16 @@ ${latestQuestionBlock}
 
         const recentMessages = await this.getRecentMessages(sessionId, 20);
 
-        const currentContext: ChatMessage[] = recentMessages.map(m => ({
-            role: m.role.toLowerCase() as any,
-            content: m.content
-        }));
-
-        console.log(`[MultiAgent] Context initialized with ${currentContext.length} messages.`);
-
         const agentsTemplate = await this.agentsService.getRuntimeAgents('MULTI_AGENT');
         if (agentsTemplate.length === 0) {
           throw new Error('当前还没有可用的多人协助模型，请先到设置面板配置并启用模型与凭证');
         }
 
         const runAgentTurn = async (config: (typeof agentsTemplate)[number]) => {
+          const currentContext = this.buildConversationContext(recentMessages);
+          console.log(
+            `[MultiAgent] Context initialized for ${config.name} with ${currentContext.length} messages.`,
+          );
           console.log(`[MultiAgent] Starting turn for ${config.name}`);
           subject.next({ data: { control: 'start_turn', agentId: config.id, agentName: config.name } });
           let turnContent = '';

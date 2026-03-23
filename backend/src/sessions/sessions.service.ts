@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { SessionMode } from '@prisma/client';
+import { MessageRole, SessionMode } from '@prisma/client';
 import { MULTI_AGENT_SUMMARY_TARGET_PREFIX } from '../chat/chat.constants';
 
 @Injectable()
@@ -72,6 +72,20 @@ export class SessionsService {
   }
 
   async updateMode(id: string, mode: SessionMode) {
+    const firstUserMessage = await this.prisma.message.findFirst({
+      where: {
+        sessionId: id,
+        role: MessageRole.USER,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (firstUserMessage) {
+      throw new BadRequestException('首条提问发出后，当前会话模式已锁定，不能再修改');
+    }
+
     return this.prisma.session.update({
       where: { id },
       data: { mode },

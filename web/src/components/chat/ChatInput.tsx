@@ -20,6 +20,12 @@ export default function ChatInput({ onSend }: ChatInputProps) {
   
   const { sessions, activeSessionId, updateSessionMode, isTyping, stopGenerating } = useSessionStore()
   const activeSession = sessions.find(s => s.id === activeSessionId)
+  const isModeLocked = Boolean(
+    activeSession && (
+      activeSession.messageCount > 0 ||
+      activeSession.messages.some((message) => message.role === 'user')
+    )
+  )
 
   // Auto-resize textarea
   useEffect(() => {
@@ -54,7 +60,7 @@ export default function ChatInput({ onSend }: ChatInputProps) {
   }, [])
 
   const selectMode = (mode: Mode) => {
-    if (activeSession) {
+    if (activeSession && !isModeLocked) {
       updateSessionMode(activeSession.id, mode)
     }
     setIsDropdownOpen(false)
@@ -93,9 +99,21 @@ export default function ChatInput({ onSend }: ChatInputProps) {
           <div className="relative" ref={dropdownRef}>
             <button 
               type="button" 
-              onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-              title="选择对话模式"
-              className={cn("flex items-center gap-1.5 rounded-full border border-border/70 bg-background/70 px-3.5 py-2 text-[12px] font-medium shadow-sm transition-colors hover:border-border dark:border-white/10 dark:bg-white/6 dark:hover:bg-white/10", modeDisplay.classes, isDropdownOpen && "border-border bg-accent dark:bg-white/10")}
+              onClick={() => {
+                if (!isModeLocked) {
+                  setIsDropdownOpen(!isDropdownOpen)
+                }
+              }}
+              title={isModeLocked ? "首条提问发出后，本会话模式已锁定" : "选择对话模式"}
+              disabled={isModeLocked}
+              className={cn(
+                "flex items-center gap-1.5 rounded-full border border-border/70 bg-background/70 px-3.5 py-2 text-[12px] font-medium shadow-sm transition-colors dark:border-white/10 dark:bg-white/6",
+                isModeLocked
+                  ? "cursor-not-allowed opacity-75"
+                  : "hover:border-border dark:hover:bg-white/10",
+                modeDisplay.classes,
+                isDropdownOpen && !isModeLocked && "border-border bg-accent dark:bg-white/10"
+              )}
             >
               {modeDisplay.icon}
               <span className="text-[12px] font-medium">{modeDisplay.text}</span>
@@ -132,6 +150,12 @@ export default function ChatInput({ onSend }: ChatInputProps) {
               </div>
             )}
           </div>
+
+          {isModeLocked && (
+            <span className="text-[11px] text-muted-foreground">
+              首条提问后模式已锁定
+            </span>
+          )}
           
           <button 
             type="button"
