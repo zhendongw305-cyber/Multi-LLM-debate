@@ -28,21 +28,47 @@ export class SessionsService {
   }
 
   async findOne(id: string) {
-    return this.prisma.session.findUnique({
+    const session = await this.prisma.session.findUnique({
       where: { id },
       include: {
         messages: {
           where: {
-            NOT: {
-              targetAgent: {
-                startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+            OR: [
+              {
+                targetAgent: null,
               },
-            },
+              {
+                targetAgent: {
+                  not: {
+                    startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+                  },
+                },
+              },
+            ],
           },
           orderBy: { createdAt: 'asc' },
         },
       },
     });
+
+    if (!session) {
+      return null;
+    }
+
+    const storedSummaries = await this.prisma.message.findMany({
+      where: {
+        sessionId: id,
+        targetAgent: {
+          startsWith: MULTI_AGENT_SUMMARY_TARGET_PREFIX,
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return {
+      ...session,
+      storedSummaries,
+    };
   }
 
   async updateMode(id: string, mode: SessionMode) {

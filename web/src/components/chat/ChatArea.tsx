@@ -113,7 +113,7 @@ function MultiAgentResponseGrid({ messages }: { messages: ChatMessage[] }) {
                 ) : (
                   <div className="flex min-h-24 items-center gap-2.5 text-sm text-muted-foreground">
                     <span className={cn('h-2 w-2 animate-pulse rounded-full', style.dot)} />
-                    <span>正在等待 {message.agentName || 'Veritas AI'} 开始回答...</span>
+                    <span>{message.agentName || 'Veritas AI'} 正在生成中...</span>
                   </div>
                 )}
               </div>

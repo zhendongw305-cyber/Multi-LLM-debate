@@ -8,10 +8,46 @@ const normalizeMode = (value?: string | null): Mode | undefined => {
   return value.toLowerCase().replace('_', '-') as Mode
 }
 
+const normalizeRole = (value?: string | null): Message['role'] => {
+  const normalized = value?.toLowerCase()
+
+  if (normalized === 'user' || normalized === 'assistant' || normalized === 'system') {
+    return normalized
+  }
+
+  return 'assistant'
+}
+
 const normalizeMessage = (message: any): Message => ({
   ...message,
+  role: normalizeRole(message.role),
   modeSnapshot: normalizeMode(message.modeSnapshot),
 })
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function fetchJsonWithRetry<T>(url: string, init?: RequestInit, retries = 2): Promise<T> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const res = await fetch(url, init)
+      if (!res.ok) {
+        throw new Error(`Request failed: ${res.status}`)
+      }
+
+      return await res.json()
+    } catch (error) {
+      lastError = error
+
+      if (attempt < retries) {
+        await wait(250 * (attempt + 1))
+      }
+    }
+  }
+
+  throw lastError
+}
 
 export interface Message {
   id: string
@@ -76,6 +112,18 @@ interface SessionStore {
   stopGenerating: () => void
 }
 
+const parseStoredSummary = (rawContent?: string | null): MultiAgentSummaryData | null => {
+  if (!rawContent) return null
+
+  try {
+    const parsed = JSON.parse(rawContent) as MultiAgentSummaryData
+    return parsed?.userMessageId ? parsed : null
+  } catch (error) {
+    console.error('Failed to parse stored multi-agent summary:', error)
+    return null
+  }
+}
+
 export const useSessionStore = create<SessionStore>((set, get) => ({
   sessions: [],
   activeSessionId: null,
@@ -97,8 +145,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   fetchSessions: async () => {
     set({ isLoading: true })
     try {
-      const res = await fetch(`${API_BASE}/sessions`)
-      const data = await res.json()
+      const data = await fetchJsonWithRetry<any[]>(`${API_BASE}/sessions`)
       const sessions = data.map((s: any) => ({
         ...s,
         mode: s.mode.toLowerCase().replace('_', '-'),
@@ -117,8 +164,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setActiveSession: async (id) => {
     set({ activeSessionId: id })
     try {
-      const res = await fetch(`${API_BASE}/sessions/${id}`)
-      const sessionData = await res.json()
+      const sessionData = await fetchJsonWithRetry<any>(`${API_BASE}/sessions/${id}`)
+      const storedSummaries = Array.isArray(sessionData.storedSummaries)
+        ? sessionData.storedSummaries
+            .map((item: any) => parseStoredSummary(item?.content))
+            .filter((item: MultiAgentSummaryData | null): item is MultiAgentSummaryData => Boolean(item))
+        : []
+
       set((state) => ({
         sessions: state.sessions.map((s) => 
           s.id === id
@@ -129,7 +181,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
                   : [],
               }
             : s
-        )
+        ),
+        multiAgentSummaries: {
+          ...state.multiAgentSummaries,
+          ...Object.fromEntries(
+            storedSummaries.map((summary: MultiAgentSummaryData) => [summary.userMessageId, summary])
+          ),
+        },
       }))
     } catch (error) {
       console.error('Failed to fetch session messages:', error)

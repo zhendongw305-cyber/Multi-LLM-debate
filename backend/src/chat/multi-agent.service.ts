@@ -42,10 +42,34 @@ export interface MultiAgentRoundSummary {
 
 @Injectable()
 export class MultiAgentService {
+  private static readonly AGENT_TIMEOUT_MS = 45000;
+
   constructor(
     private prisma: PrismaService,
     private agentsService: AgentsService,
   ) {}
+
+  private buildAgentSystemPrompt(basePrompt: string | null | undefined, latestQuestion: string) {
+    const defaultPrompt =
+      basePrompt ||
+      '你是一个专业的 AI 协作顾问。请结合当前会话上下文，提供清晰、具体、对整体协作有新增价值的回答。';
+
+    const latestQuestionBlock = latestQuestion.trim()
+      ? `当前最新问题是：${latestQuestion.trim()}`
+      : '当前最新问题就是最后一条 user 消息。';
+
+    return `${defaultPrompt}
+
+请始终把“准确回答用户最后一条 user 消息”放在第一优先级。
+${latestQuestionBlock}
+如果这条问题本身可以直接回答，例如简单计算、事实问答、定义问答、是非判断，第一句话就直接给出结论，尽量简短。
+除非用户明确要求展开，否则不要把简单问题扩展成分析框架、项目建议、泛化模板或自我角色说明。
+如果确实缺少上下文，请直接说明缺少什么，不要假设存在额外业务背景或历史讨论。`;
+  }
+
+  private isAgentFailureMessage(content: string) {
+    return content.trim().startsWith('[系统异常]:');
+  }
 
   private findLastUserMessageIndex(
     messages: { id: string; role: MessageRole; modeSnapshot: SessionMode | null }[],
@@ -138,7 +162,13 @@ export class MultiAgentService {
     );
 
     const agentAnswers = roundMessages
-      .filter((message) => message.role === 'ASSISTANT' && message.agentName && message.agentName !== '系统')
+      .filter(
+        (message) =>
+          message.role === 'ASSISTANT' &&
+          message.agentName &&
+          message.agentName !== '系统' &&
+          !this.isAgentFailureMessage(message.content),
+      )
       .map((message) => ({
         agentId: message.agentId,
         agentName: message.agentName || 'Veritas AI',
@@ -271,6 +301,22 @@ export class MultiAgentService {
           console.log(`[MultiAgent] Starting turn for ${config.name}`);
           subject.next({ data: { control: 'start_turn', agentId: config.id, agentName: config.name } });
           let turnContent = '';
+          let finalContentToPersist = '';
+          let didTimeout = false;
+          const timeoutController = new AbortController();
+          const timeoutId = setTimeout(() => {
+            didTimeout = true;
+            timeoutController.abort();
+          }, MultiAgentService.AGENT_TIMEOUT_MS);
+          const abortFromCaller = () => timeoutController.abort();
+
+          if (signal) {
+            if (signal.aborted) {
+              abortFromCaller();
+            } else {
+              signal.addEventListener('abort', abortFromCaller, { once: true });
+            }
+          }
 
           try {
             const completion = await config.client.chat.completions.create({
@@ -278,14 +324,12 @@ export class MultiAgentService {
               messages: [
                 {
                   role: 'system',
-                  content:
-                    config.systemPrompt ||
-                    '你是一个专业的 AI 协作顾问。请结合当前会话上下文，提供清晰、具体、对整体协作有新增价值的回答。',
+                  content: this.buildAgentSystemPrompt(config.systemPrompt, initialContent),
                 },
                 ...currentContext,
               ],
               stream: true,
-            }, { signal });
+            }, { signal: timeoutController.signal });
 
             for await (const chunk of completion) {
               const content = chunk.choices[0]?.delta?.content || '';
@@ -295,32 +339,49 @@ export class MultiAgentService {
               }
             }
             console.log(`[MultiAgent] Finished turn for ${config.name}. Length: ${turnContent.length}`);
-
-            if (turnContent.trim()) {
-              await this.prisma.message.create({
-                data: {
-                  sessionId,
-                  content: turnContent,
-                  role: 'ASSISTANT',
-                  modeSnapshot: session.mode,
-                  agentId: config.id,
-                  agentName: config.name,
-                },
-              });
-            }
+            finalContentToPersist = turnContent.trim();
           } catch (err: any) {
-            if (err?.name === 'AbortError') {
+            if (err?.name === 'AbortError' && signal?.aborted && !didTimeout) {
               throw err;
             }
 
             console.error(`[MultiAgent] ${config.name} failed`, err);
+            const failureMessage = didTimeout
+              ? `[系统异常]: ${config.name} 在 45 秒内没有返回结果，已跳过。`
+              : `[系统异常]: ${config.name} 回答失败 - ${err?.message || '未知错误'}`;
+            finalContentToPersist = turnContent.trim()
+              ? `${turnContent}\n\n${failureMessage}`
+              : failureMessage;
             subject.next({
               data: {
-                content: `\n\n[系统异常]: ${config.name} 回答失败 - ${err?.message || '未知错误'}`,
-                agentName: '系统',
+                content: failureMessage,
+                agentId: config.id,
+                agentName: config.name,
               },
             });
           } finally {
+            clearTimeout(timeoutId);
+            if (signal) {
+              signal.removeEventListener('abort', abortFromCaller);
+            }
+
+            if (finalContentToPersist) {
+              try {
+                await this.prisma.message.create({
+                  data: {
+                    sessionId,
+                    content: finalContentToPersist,
+                    role: 'ASSISTANT',
+                    modeSnapshot: session.mode,
+                    agentId: config.id,
+                    agentName: config.name,
+                  },
+                });
+              } catch (persistError) {
+                console.error(`[MultiAgent] Failed to persist message for ${config.name}`, persistError);
+              }
+            }
+
             subject.next({ data: { control: 'end_turn', agentId: config.id, agentName: config.name } });
           }
         };
